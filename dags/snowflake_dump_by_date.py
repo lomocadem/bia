@@ -1,6 +1,5 @@
-import datetime
+# import datetime
 import logging
-from datetime import datetime as dt
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 import os
@@ -17,14 +16,13 @@ SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER")
 SNOWFLAKE_PW = os.getenv("SNOWFLAKE_PW")
 SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
 
-first_day_cur_month = dt.today().replace(day=1)
-cur_month = first_day_cur_month.strftime('%Y%m')
-last_month = (first_day_cur_month - datetime.timedelta(days=1)).strftime('%Y%m')
+start_date_value = "2022-07-01"
+end_date_value = "2022-09-10"
 
 
-def ftpfiles_to_pd(ti, place, start_month, end_month):
-    start_month = dt(int(start_month[:4]), int(start_month[4:]), 1)
-    end_month = dt(int(end_month[:4]), int(end_month[4:]), 1)
+def ftpfiles_to_pd(ti, place, start_date, end_date):
+    start_date = dt.strptime(start_date, "%Y-%m-%d")
+    end_date = dt.strptime(end_date, "%Y-%m-%d")
     server = 'ftp.bom.gov.au'
     ftp = ftplib.FTP(server)
     ftp.login()
@@ -35,14 +33,13 @@ def ftpfiles_to_pd(ti, place, start_month, end_month):
     for file in files:
         if ".csv" in file:
             month = get_month(file)
-            if end_month > month >= start_month:
+            if end_date > month >= start_date:
                 months.append(month)
                 with open(file, "wb") as bufer:
                     # use FTP's RETR command to download the file
                     ftp.retrbinary(f"RETR {file}", bufer.write)
-                df = process_file(file)
+                df = process_file_monthly(file)
                 os.remove(file)
-                # print(month, df.head())
                 ti.xcom_push(key=f"data_{str(month.strftime('%Y%m'))}", value=df)
     ti.xcom_push(key="months", value=months)
     ftp.close()
@@ -57,7 +54,7 @@ def save_to_snowflake_func(ti):
             data_df = ti.xcom_pull(key=f"data_{str(month.strftime('%Y%m'))}",
                                    task_ids=f'get_{place.replace("(", "").replace(")", "")}_data')
             data_df_full = data_df_full.append(data_df)
-            place_dict.update({place: data_df})
+        place_dict.update({place: data_df_full})
     sqlalchemy_url = 'snowflake://{user}:{password}@{account_identifier}/{database_name}/{schema_name}?warehouse={warehouse_name}' \
         .format(user=SNOWFLAKE_USER,
                 password=SNOWFLAKE_PW,
@@ -73,13 +70,23 @@ def save_to_snowflake_func(ti):
         data_df = place_dict[place]
         assert isinstance(data_df, pd.DataFrame)
         data_df.replace(r'^\s*$', np.nan, regex=True, inplace=True)
-        data_df.to_sql(con=connection, name=SNOWFLAKE_TABLE,
-                       if_exists='append', index=False)
+        # Check with DB
+        max_date = data_df['date'].max()
+        min_date = data_df['date'].min()
+        existing_data = pd.read_sql(
+            sql=f"SELECT * FROM TEST_TAB WHERE date >= '{min_date}' AND date <= '{max_date}' AND station_name = '{data_df.iloc[0,0]}'",
+            con=connection)
+        if existing_data.empty:
+            data_df.to_sql(con=connection, name=SNOWFLAKE_TABLE, if_exists='append', index=False)
+        else:
+            # Remove existed data: # TODO: Update if necessary
+            data_df = data_df[~data_df["date"].isin(existing_data["date"])]
+            data_df.to_sql(con=connection, name=SNOWFLAKE_TABLE, if_exists='append', index=False)
     connection.close()
     engine.dispose()
 
 
-with DAG('snowflake_dump',
+with DAG('snowflake_dump_by_date',
          schedule_interval='@monthly',
          start_date=dt(2022, 1, 1),
          catchup=False,
@@ -88,10 +95,8 @@ with DAG('snowflake_dump',
         PythonOperator(
             task_id=f'get_{place.replace("(", "").replace(")", "")}_data',
             python_callable=ftpfiles_to_pd,
-            op_kwargs={"place": place, "start_month": "202205", "end_month": "202209"}
+            op_kwargs={"place": place, "start_date": start_date_value, "end_date": end_date_value}
         ) for place in places]
 
-    save_to_snowflake = PythonOperator(
-        task_id='save_to_snowflake',
-        python_callable=save_to_snowflake_func,)
+    save_to_snowflake = PythonOperator(task_id='save_to_snowflake', python_callable=save_to_snowflake_func,)
     get_ftp_tasks >> save_to_snowflake
