@@ -1,4 +1,4 @@
-# import datetime
+import datetime
 import logging
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 
 SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE")
+SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE")
 SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA")
 SNOWFLAKE_TABLE = os.getenv("SNOWFLAKE_TABLE")
 SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER")
@@ -35,11 +36,12 @@ def ftpfiles_to_pd(ti, place, start_date, end_date):
             month = get_month(file)
             if end_date > month >= start_date:
                 months.append(month)
-                with open(file, "wb") as bufer:
+                with open(file, "w+b") as buffer:
                     # use FTP's RETR command to download the file
-                    ftp.retrbinary(f"RETR {file}", bufer.write)
+                    ftp.retrbinary(f"RETR {file}", buffer.write)
                 df = process_file_monthly(file)
-                os.remove(file)
+                if os.path.exists(file):
+                    os.remove(file)
                 ti.xcom_push(key=f"data_{str(month.strftime('%Y%m'))}", value=df)
     ti.xcom_push(key="months", value=months)
     ftp.close()
@@ -59,7 +61,7 @@ def save_to_snowflake_func(ti):
         .format(user=SNOWFLAKE_USER,
                 password=SNOWFLAKE_PW,
                 account_identifier=SNOWFLAKE_ACCOUNT,
-                database_name=SNOWFLAKE_WAREHOUSE,
+                database_name=SNOWFLAKE_DATABASE,
                 schema_name=SNOWFLAKE_SCHEMA,
                 warehouse_name=SNOWFLAKE_WAREHOUSE)
     engine = create_engine(url=sqlalchemy_url)
@@ -74,7 +76,7 @@ def save_to_snowflake_func(ti):
         max_date = data_df['date'].max()
         min_date = data_df['date'].min()
         existing_data = pd.read_sql(
-            sql=f"SELECT * FROM TEST_TAB WHERE date >= '{min_date}' AND date <= '{max_date}' AND station_name = '{data_df.iloc[0,0]}'",
+            sql=f"SELECT * FROM {SNOWFLAKE_TABLE} WHERE date >= '{min_date}' AND date <= '{max_date}' AND station_name = '{data_df.iloc[0,0]}'",
             con=connection)
         if existing_data.empty:
             data_df.to_sql(con=connection, name=SNOWFLAKE_TABLE, if_exists='append', index=False)
@@ -98,5 +100,6 @@ with DAG('snowflake_dump_by_date',
             op_kwargs={"place": place, "start_date": start_date_value, "end_date": end_date_value}
         ) for place in places]
 
-    save_to_snowflake = PythonOperator(task_id='save_to_snowflake', python_callable=save_to_snowflake_func,)
+    save_to_snowflake = PythonOperator(task_id='save_to_snowflake', python_callable=save_to_snowflake_func,
+                                       retries=3, retry_delay=datetime.timedelta(seconds=5))
     get_ftp_tasks >> save_to_snowflake

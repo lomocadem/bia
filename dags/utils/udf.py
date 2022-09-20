@@ -47,24 +47,15 @@ def process_file_monthly(filename):
         names=colnames)
     # Drop Total Row
     df.drop(df.index[-1], inplace=True)
+    # Format date column
+    df["date"] = df["date"].apply(format_date)
     return df
 
 
 def process_file_daily(filename, ytd: dt):
-    import pandas as pd
-    colnames = ['station_name', 'date',
-                'evapo_transpiration', 'rain',
-                'pan_evaporation', 'max_temp', 'min_temp',
-                'max_relative_hum', 'min_relative_hum',
-                'avg_10m_wind_speed', 'solar_radiation']
-    df = pd.read_csv(
-        filename, skiprows=13,
-        encoding='unicode_escape',
-        names=colnames)
-    # Drop Total Row
-    df.drop(df.index[-1], inplace=True)
+    df = process_file_monthly(filename)  # Date formatted by monthly function
     # Get Target Row
-    target_row = df[df["date"] == ytd.strftime("%d/%m/%Y")]
+    target_row = df[df["date"] == ytd.strftime("%Y-%m-%d")]
     return target_row
 
 
@@ -73,3 +64,8 @@ def get_month(file_name: str):
     _month = int(_time[4:])
     _year = int(_time[:4])
     return dt(_year, _month, 1)
+
+
+def format_date(date: str):
+    date_instance = dt.strptime(date, '%d/%m/%Y')
+    return date_instance.strftime('%Y-%m-%d')
