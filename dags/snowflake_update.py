@@ -28,11 +28,12 @@ def ftpfiles_to_pd(ti, place, logical_date):
     files = ftp.nlst()
     target_month = ytd.strftime('%Y%m')
     filename = [file for file in files if target_month in file][0]
-    with open(filename, "wb") as file:
+    with open(filename, "w+b") as buffer:
         # use FTP's RETR command to download the file
-        ftp.retrbinary(f"RETR {filename}", file.write)
+        ftp.retrbinary(f"RETR {filename}", buffer.write)
     df = process_file_daily(filename, ytd)
-    os.remove(filename)
+    if os.path.exists(filename):
+        os.remove(filename)
     ftp.close()
     # print(df.head())
     ti.xcom_push(key="new_data", value=df)
@@ -59,7 +60,7 @@ def save_to_snowflake_func(ti):
         assert isinstance(data_df, pd.DataFrame)
         # Check with DB
         existing_data = pd.read_sql(
-            sql=f"SELECT * FROM TEST_TAB WHERE date = '{data_df.iloc[0,1]}' AND station_name = '{data_df.iloc[0,0]}'",
+            sql=f"SELECT * FROM {SNOWFLAKE_TABLE} WHERE date = '{data_df.iloc[0,1]}' AND station_name = '{data_df.iloc[0,0]}'",
             con=connection)
         if existing_data.empty:
             # New data not existed in the db
@@ -81,6 +82,8 @@ with DAG('snowflake_update',
     get_ftp_tasks = [
         PythonOperator(
             task_id=f'get_{place.replace("(", "").replace(")", "")}_data',
+            retries=3,
+            retry_delay=datetime.timedelta(seconds=5),
             python_callable=ftpfiles_to_pd,
             # op_kwargs={"place": place, "logical_date": "2022-07-01"}  # Choose a specific date
             op_kwargs={"place": place, "logical_date": "{{ ds }}"}  # Access default params (logical_date) using Jinja Template
@@ -89,5 +92,7 @@ with DAG('snowflake_update',
     save_to_snowflake = PythonOperator(
         task_id='save_to_snowflake',
         python_callable=save_to_snowflake_func,
+        retries=3,
+        retry_delay=datetime.timedelta(seconds=5)
     )
     get_ftp_tasks >> save_to_snowflake
