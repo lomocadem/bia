@@ -90,7 +90,7 @@ def save_to_snowflake_func(ti):
 
 with DAG('snowflake_dump_by_date',
          schedule_interval='@monthly',
-         start_date=dt(2022, 1, 1),
+         start_date=dt(2020, 1, 1),
          catchup=False,
          ) as dag:
     get_ftp_tasks = [
